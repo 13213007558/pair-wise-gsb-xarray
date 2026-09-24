@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 from collections.abc import Hashable, Iterable, Mapping
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, TypeVar
 
 import numpy as np
@@ -68,6 +69,37 @@ class TreeAdapter(abc.ABC):
         """
         raise NotImplementedError
 
+    def query_neighbors(
+        self, points: np.ndarray, *, k: int, radius: float
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Query up to k nearest neighbors within a radius for each point.
+
+        Parameters
+        ----------
+        points: ndarray of shape (n_points, n_coordinates)
+            Two-dimensional array of points/samples (rows) and their
+            corresponding coordinate labels (columns) to query.
+        k : int
+            Maximum number of neighbors to return for each query point.
+        radius : float
+            Maximum distance (inclusive) of the returned neighbors.
+
+        Returns
+        -------
+        distances : ndarray of shape (n_points, k)
+            Distances to the neighbors, sorted by increasing distance.
+            Missing entries (fewer than k neighbors within the radius)
+            must be set to inf.
+        indices : ndarray of shape (n_points, k)
+            Indices of the neighbors in the array of the indexed points.
+            Neighbors at equal distance must be ordered by increasing
+            index (stable sort). Missing entries must be set to -1.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support radius-limited "
+            "k-nearest neighbor queries"
+        )
+
 
 class ScipyKDTreeAdapter(TreeAdapter):
     """:py:class:`scipy.spatial.KDTree` adapter for :py:class:`~xarray.indexes.NDPointIndex`."""
@@ -91,6 +123,34 @@ class ScipyKDTreeAdapter(TreeAdapter):
     def equals(self, other: Self) -> bool:
         return np.array_equal(self._kdtree.data, other._kdtree.data)
 
+    def query_neighbors(
+        self, points: np.ndarray, *, k: int, radius: float
+    ) -> tuple[np.ndarray, np.ndarray]:
+        n_indexed = len(self._kdtree.data)
+        # scipy's distance_upper_bound excludes points at exactly the given
+        # distance: slightly bump it to make the radius inclusive
+        distances, indices = self._kdtree.query(
+            points, k=k, distance_upper_bound=np.nextafter(radius, np.inf)
+        )
+
+        # scipy drops the neighbor axis when k=1
+        if k == 1:
+            distances = distances[:, np.newaxis]
+            indices = indices[:, np.newaxis]
+
+        # break distance ties by original point position (stable sort)
+        order = np.lexsort((indices, distances), axis=1)
+        distances = np.take_along_axis(distances, order, axis=1)
+        indices = np.take_along_axis(indices, order, axis=1)
+
+        # scipy flags missing neighbors with an out-of-bounds index: convert
+        # it to an explicit -1 missing indicator
+        missing = (indices >= n_indexed) | (distances > radius)
+        indices = np.where(missing, -1, indices)
+        distances = np.where(missing, np.inf, distances)
+
+        return distances, indices
+
 
 def get_points(coords: Iterable[Variable | Any]) -> np.ndarray:
     """Re-arrange data from a sequence of xarray coordinate variables or
@@ -102,6 +162,32 @@ def get_points(coords: Iterable[Variable | Any]) -> np.ndarray:
 
 
 T_TreeAdapter = TypeVar("T_TreeAdapter", bound=TreeAdapter)
+
+
+@dataclass(frozen=True)
+class NeighborsResult:
+    """Result of :py:meth:`NDPointIndex.sel_neighbors`.
+
+    Attributes
+    ----------
+    dim_indexers : dict of Hashable to Variable
+        Dimension indexers suitable for :py:meth:`Dataset.isel` or
+        :py:meth:`DataArray.isel`. Each indexer has the broadcast dimensions
+        of the query labels plus a trailing neighbor dimension. Positions
+        with no neighbor are clamped to index 0; use ``mask`` to identify
+        them.
+    distances : DataArray
+        Distances to the neighbors with the broadcast dimensions of the
+        query labels plus a trailing neighbor dimension. Missing entries
+        are set to inf.
+    mask : DataArray
+        Boolean array (same dimensions as ``distances``) that is True
+        where a neighbor was found within the radius and False elsewhere.
+    """
+
+    dim_indexers: dict[Hashable, Variable]
+    distances: DataArray
+    mask: DataArray
 
 
 class NDPointIndex(Index, Generic[T_TreeAdapter]):
@@ -272,6 +358,11 @@ class NDPointIndex(Index, Generic[T_TreeAdapter]):
 
         points = get_points(variables.values())
 
+        if points.shape[0] == 0:
+            raise ValueError(
+                "cannot create an NDPointIndex from coordinates with zero points"
+            )
+
         return cls(
             tree_adapter_cls(points, options=opts),
             coord_names=tuple(variables),
@@ -304,11 +395,11 @@ class NDPointIndex(Index, Generic[T_TreeAdapter]):
     def _get_dim_indexers(
         self,
         indices: np.ndarray,
-        label_dims: tuple[Hashable, ...],
-        label_shape: tuple[int, ...],
+        dims: tuple[Hashable, ...],
+        shape: tuple[int, ...],
     ) -> dict[Hashable, Variable]:
         """Returns dimension indexers based on the query results (indices) and
-        the original label dimensions and shape.
+        the given indexer dimensions and shape.
 
         1. Unravel the flat indices returned from the query
         2. Reshape the unraveled indices according to indexers shapes
@@ -320,7 +411,7 @@ class NDPointIndex(Index, Generic[T_TreeAdapter]):
         u_indices = list(np.unravel_index(indices.ravel(), self._shape))
 
         for dim, ind in zip(self._dims, u_indices, strict=False):
-            dim_indexers[dim] = Variable(label_dims, ind.reshape(label_shape))
+            dim_indexers[dim] = Variable(dims, ind.reshape(shape))
 
         return dim_indexers
 
@@ -332,6 +423,23 @@ class NDPointIndex(Index, Generic[T_TreeAdapter]):
                 "NDPointIndex only supports selection with method='nearest'"
             )
 
+        xr_labels, label_dims, label_shape = self._normalize_labels(labels)
+
+        # get and return dimension indexers
+        points = get_points(xr_labels[name] for name in self._coord_names)
+        _, indices = self._tree_obj.query(points)
+
+        dim_indexers = self._get_dim_indexers(indices, label_dims, label_shape)
+
+        return IndexSelResult(dim_indexers=dim_indexers)
+
+    def _normalize_labels(
+        self, labels: dict[Any, Any]
+    ) -> tuple[dict[Any, DataArray], tuple[Hashable, ...], tuple[int, ...]]:
+        """Validate labels, convert them to broadcasted DataArray objects and
+        return them along with their broadcast dimensions and shape.
+
+        """
         missing_labels = set(self._coord_names) - set(labels)
         if missing_labels:
             missing_labels_str = ",".join([f"{name}" for name in missing_labels])
@@ -365,13 +473,97 @@ class NDPointIndex(Index, Generic[T_TreeAdapter]):
         label_shape = broadcasted[0].shape
         xr_labels = dict(zip(xr_labels, broadcasted, strict=True))
 
-        # get and return dimension indexers
+        return xr_labels, label_dims, label_shape
+
+    def sel_neighbors(
+        self,
+        labels: dict[Any, Any],
+        *,
+        k: int,
+        radius: float,
+        neighbor_dim: Hashable = "neighbor",
+    ) -> NeighborsResult:
+        """Query up to k nearest neighbors within a radius for each label.
+
+        The query labels are broadcast against one another like in
+        :py:meth:`NDPointIndex.sel`. The returned indexers, distances and
+        mask all have the broadcast label dimensions plus a trailing
+        neighbor dimension of size k.
+
+        Parameters
+        ----------
+        labels : dict
+            Mapping of coordinate names to query labels (same kinds of
+            values as accepted by :py:meth:`NDPointIndex.sel`).
+        k : int
+            Maximum number of neighbors to return for each query point.
+            It may be larger than the total number of indexed points, in
+            which case the remaining entries are flagged as missing.
+        radius : float
+            Maximum distance (inclusive) of the returned neighbors.
+        neighbor_dim : Hashable, default: "neighbor"
+            Name of the extra neighbor dimension in the returned indexers,
+            distances and mask.
+
+        Returns
+        -------
+        NeighborsResult
+            Dimension indexers (missing entries clamped to index 0),
+            distances (missing entries set to inf) and a boolean mask
+            indicating which entries are actual neighbors.
+
+        """
+        if isinstance(k, bool) or not isinstance(k, int | np.integer) or k < 1:
+            raise ValueError(f"k must be a positive integer, got {k!r}")
+        k = int(k)
+
+        try:
+            radius = float(radius)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"radius must be a non-negative number, got {radius!r}"
+            ) from None
+        if np.isnan(radius) or radius < 0:
+            raise ValueError(f"radius must be a non-negative number, got {radius!r}")
+
+        xr_labels, label_dims, label_shape = self._normalize_labels(labels)
+
+        if neighbor_dim in label_dims:
+            raise ValueError(
+                f"neighbor dimension {neighbor_dim!r} conflicts with the label "
+                "dimensions, please choose another neighbor_dim value"
+            )
+
         points = get_points(xr_labels[name] for name in self._coord_names)
-        _, indices = self._tree_obj.query(points)
 
-        dim_indexers = self._get_dim_indexers(indices, label_dims, label_shape)
+        # non-finite query coordinates have no neighbor by definition
+        valid = np.isfinite(points).all(axis=1)
 
-        return IndexSelResult(dim_indexers=dim_indexers)
+        n_queries = points.shape[0]
+        distances = np.full((n_queries, k), np.inf)
+        indices = np.full((n_queries, k), -1, dtype=np.intp)
+
+        if valid.any():
+            d, i = self._tree_obj.query_neighbors(points[valid], k=k, radius=radius)
+            distances[valid] = d
+            indices[valid] = i
+
+        mask = indices >= 0
+
+        # clamp missing entries so that the indexers can never accidentally
+        # select the last indexed sample (e.g., via a -1 index)
+        safe_indices = np.where(mask, indices, 0)
+
+        result_dims = tuple(label_dims) + (neighbor_dim,)
+        result_shape = tuple(label_shape) + (k,)
+
+        dim_indexers = self._get_dim_indexers(safe_indices, result_dims, result_shape)
+        distances_da = DataArray(distances.reshape(result_shape), dims=result_dims)
+        mask_da = DataArray(mask.reshape(result_shape), dims=result_dims)
+
+        return NeighborsResult(
+            dim_indexers=dim_indexers, distances=distances_da, mask=mask_da
+        )
 
     def rename(
         self,

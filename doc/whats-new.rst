@@ -13,6 +13,12 @@ v2026.07.1 (unreleased)
 
 New Features
 ~~~~~~~~~~~~
+- New :py:meth:`xarray.indexes.NDPointIndex.sel_neighbors` method for querying
+  up to ``k`` nearest neighbors within a given radius for each query point.
+  It returns dimension indexers, distances and an explicit boolean mask for
+  missing entries, with the broadcast label dimensions plus an extra neighbor
+  dimension. Third-party tree structures may support this new query by
+  implementing :py:meth:`xarray.indexes.TreeAdapter.query_neighbors`.
 - Added `PyArrowCapsule interface <https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html#arrow-pycapsule-interface>`_
   to :py:class:`DataArray` (``__arrow_c_schema__`` and ``__arrow_c_stream__``), enabling near zero-copy
   export to pyarrow, polars or duckdb.
