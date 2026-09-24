@@ -54,6 +54,7 @@ These classes are building blocks for more complex Indexes:
    indexes.CoordinateTransform
    indexes.CoordinateTransformIndex
    indexes.NDPointIndex
+   indexes.NeighborQueryResult
    indexes.TreeAdapter
 
 The Index base class for building custom indexes:

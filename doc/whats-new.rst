@@ -13,6 +13,16 @@ v2026.07.1 (unreleased)
 
 New Features
 ~~~~~~~~~~~~
+- Added :py:meth:`indexes.NDPointIndex.query_neighbors` for querying the up-to
+  ``k`` nearest neighbors of points within a maximum radius. It returns a
+  :py:class:`indexes.NeighborQueryResult` with the dimension indexers of the
+  neighbors (preserving the broadcast dimensions of the query labels plus an
+  extra neighbor dimension), their distances and an explicit boolean mask for
+  missing neighbors. The optional
+  :py:meth:`indexes.TreeAdapter.query_neighbors` method of
+  :py:class:`indexes.TreeAdapter` enables this query for 3rd-party tree
+  adapters; it is implemented for :py:class:`scipy.spatial.KDTree`.
+
 - Added `PyArrowCapsule interface <https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html#arrow-pycapsule-interface>`_
   to :py:class:`DataArray` (``__arrow_c_schema__`` and ``__arrow_c_stream__``), enabling near zero-copy
   export to pyarrow, polars or duckdb.
