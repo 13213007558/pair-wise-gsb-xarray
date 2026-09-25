@@ -7627,6 +7627,261 @@ class TestDataset:
         np.testing.assert_allclose(da_fitval, da)
 
     @staticmethod
+    def _gls_error_cov(labels: np.ndarray, rho: float = 0.6) -> xr.DataArray:
+        n = labels.size
+        cov = rho ** np.abs(np.subtract.outer(np.arange(n), np.arange(n)))
+        return xr.DataArray(
+            cov,
+            dims=("obs_i", "obs_j"),
+            coords={"obs_i": labels, "obs_j": labels},
+        )
+
+    @staticmethod
+    def _gls_direct(
+        x: np.ndarray, y: np.ndarray, cov: np.ndarray, deg: int
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        # Independent generalized least squares formula
+        vander = np.vander(x, deg + 1)
+        cov_inv = np.linalg.inv(cov)
+        beta = np.linalg.solve(vander.T @ cov_inv @ vander, vander.T @ cov_inv @ y)
+        resid = y - vander @ beta
+        return beta, resid @ cov_inv @ resid, np.linalg.inv(vander.T @ cov_inv @ vander)
+
+    def test_polyfit_gls(self) -> None:
+        rng = np.random.default_rng(0)
+        labels = np.arange(12) * 10.0
+        error_cov = self._gls_error_cov(labels)
+        y = 1 + 2 * labels + rng.normal(size=labels.size)
+        da = xr.DataArray(y, dims="t", coords={"t": labels})
+
+        out = da.polyfit("t", 1, error_cov=error_cov, full=True, cov="unscaled")
+        beta, rss, cov = self._gls_direct(labels, y, error_cov.values, 1)
+        np.testing.assert_allclose(out.polyfit_coefficients, beta, rtol=1e-10)
+        np.testing.assert_allclose(out.polyfit_residuals, rss, rtol=1e-10)
+        np.testing.assert_allclose(out.polyfit_covariance, cov, rtol=1e-10)
+        assert out.polyfit_coefficients.dims == ("degree",)
+
+    def test_polyfit_gls_identity_is_ols(self) -> None:
+        rng = np.random.default_rng(1)
+        labels = np.arange(10, dtype=float)
+        da = xr.DataArray(
+            3 - labels + rng.normal(size=labels.size), dims="t", coords={"t": labels}
+        )
+        error_cov = xr.DataArray(
+            np.eye(labels.size),
+            dims=("obs_i", "obs_j"),
+            coords={"obs_i": labels, "obs_j": labels},
+        )
+        expected = da.polyfit("t", 2)
+        actual = da.polyfit("t", 2, error_cov=error_cov)
+        xr.testing.assert_identical(expected, actual)
+
+    def test_polyfit_gls_shuffled_labels(self) -> None:
+        rng = np.random.default_rng(2)
+        labels = np.arange(12) * 10.0
+        error_cov = self._gls_error_cov(labels)
+        y = 1 + 2 * labels + rng.normal(size=labels.size)
+        da = xr.DataArray(y, dims="t", coords={"t": labels})
+
+        perm = rng.permutation(labels.size)
+        shuffled = xr.DataArray(
+            error_cov.values[perm][:, perm],
+            dims=("obs_i", "obs_j"),
+            coords={"obs_i": labels[perm], "obs_j": labels[perm]},
+        )
+        expected = da.polyfit("t", 1, error_cov=error_cov, full=True, cov=True)
+        actual = da.polyfit("t", 1, error_cov=shuffled, full=True, cov=True)
+        xr.testing.assert_identical(expected, actual)
+
+    def test_polyfit_gls_missing_patterns(self) -> None:
+        rng = np.random.default_rng(3)
+        labels = np.arange(12) * 10.0
+        error_cov = self._gls_error_cov(labels)
+        cov = error_cov.values
+        ds = xr.Dataset(
+            {
+                "v1": ("t", 1 + 2 * labels + rng.normal(size=labels.size)),
+                "v2": ("t", 3 - labels + rng.normal(size=labels.size)),
+            },
+            coords={"t": labels},
+        )
+        ds["v1"][2] = np.nan
+        ds["v2"][5] = np.nan
+        ds["v2"][7] = np.nan
+
+        out = ds.polyfit("t", 1, error_cov=error_cov, skipna=True, full=True)
+        for name, missing in (("v1", [2]), ("v2", [5, 7])):
+            valid = np.ones(labels.size, dtype=bool)
+            valid[missing] = False
+            beta, rss, _ = self._gls_direct(
+                labels[valid], ds[name].values[valid], cov[np.ix_(valid, valid)], 1
+            )
+            np.testing.assert_allclose(
+                out[f"{name}_polyfit_coefficients"], beta, rtol=1e-10
+            )
+            np.testing.assert_allclose(
+                out[f"{name}_polyfit_residuals"], rss, rtol=1e-10
+            )
+
+    def test_polyfit_gls_extra_dims(self) -> None:
+        rng = np.random.default_rng(4)
+        labels = np.arange(10, dtype=float)
+        error_cov = self._gls_error_cov(labels, rho=0.4)
+        y = np.stack(
+            [1 + 2 * labels + rng.normal(size=10), 3 - labels + rng.normal(size=10)],
+            axis=1,
+        )
+        ds = xr.Dataset(
+            {"v": (("t", "d"), y)}, coords={"t": labels, "d": ["a", "b"]}
+        )
+        out = ds.polyfit("t", 1, error_cov=error_cov, cov=True)
+        assert out["v_polyfit_coefficients"].dims == ("degree", "d")
+        assert out["v_polyfit_residuals"].dims == ("d",)
+        assert out["v_polyfit_covariance"].dims == ("cov_i", "cov_j", "d")
+        for j in range(2):
+            beta, _, _ = self._gls_direct(labels, y[:, j], error_cov.values, 1)
+            np.testing.assert_allclose(
+                out["v_polyfit_coefficients"].isel(d=j), beta, rtol=1e-10
+            )
+
+    def test_polyfit_gls_cov_scaling(self) -> None:
+        rng = np.random.default_rng(5)
+        labels = np.arange(12, dtype=float)
+        error_cov = self._gls_error_cov(labels)
+        y = 1 + 2 * labels + rng.normal(size=labels.size)
+        da = xr.DataArray(y, dims="t", coords={"t": labels})
+
+        # With a known absolute covariance (cov="unscaled") the coefficient
+        # covariance is exactly (X^T S^-1 X)^-1; with cov=True (covariance
+        # known only up to a common scale) it is scaled by the residual
+        # variance estimate rss / (n - order).
+        unscaled = da.polyfit("t", 1, error_cov=error_cov, cov="unscaled")
+        scaled = da.polyfit("t", 1, error_cov=error_cov, cov=True)
+        order = 2
+        factor = scaled.polyfit_residuals / (labels.size - order)
+        xr.testing.assert_allclose(
+            scaled.polyfit_covariance, unscaled.polyfit_covariance * factor
+        )
+
+    @requires_dask
+    def test_polyfit_gls_dask(self) -> None:
+        rng = np.random.default_rng(6)
+        labels = np.arange(10, dtype=float)
+        error_cov = self._gls_error_cov(labels, rho=0.4)
+        y = np.stack(
+            [1 + 2 * labels + rng.normal(size=10), 3 - labels + rng.normal(size=10)],
+            axis=1,
+        )
+        y[3, 0] = np.nan
+        ds = xr.Dataset({"v": (("t", "d"), y)}, coords={"t": labels, "d": [0, 1]})
+        ds_dask = ds.chunk({"t": 4})
+
+        # Building the graph must not read the observation data
+        with raise_if_dask_computes():
+            actual_lazy = ds_dask.polyfit("t", 1, error_cov=error_cov, cov=True)
+        expected = ds.polyfit("t", 1, error_cov=error_cov, cov=True)
+        xr.testing.assert_allclose(actual_lazy.compute(), expected)
+
+        # skipna=False path without missing values
+        ds_full = ds.fillna(0.0)
+        with raise_if_dask_computes():
+            actual_lazy = ds_full.chunk({"t": 4}).polyfit(
+                "t", 1, error_cov=error_cov, skipna=False
+            )
+        expected = ds_full.polyfit("t", 1, error_cov=error_cov, skipna=False)
+        xr.testing.assert_allclose(actual_lazy.compute(), expected)
+
+    def test_polyfit_gls_w_conflict(self) -> None:
+        labels = np.arange(6, dtype=float)
+        da = xr.DataArray(labels, dims="t", coords={"t": labels})
+        error_cov = self._gls_error_cov(labels)
+        with pytest.raises(ValueError, match="cannot be used together"):
+            da.polyfit("t", 1, w=np.ones(6), error_cov=error_cov)
+
+    def test_polyfit_gls_invalid_covariance(self) -> None:
+        labels = np.arange(6, dtype=float)
+        da = xr.DataArray(labels, dims="t", coords={"t": labels})
+        error_cov = self._gls_error_cov(labels)
+
+        with warnings.catch_warnings():
+            # xarray warns when constructing variables with repeated dims
+            warnings.simplefilter("ignore", UserWarning)
+            dup_dim_error_cov = xr.DataArray(
+                error_cov.values, dims=("obs", "obs"), coords={"obs": labels}
+            )
+
+        # Not a DataArray
+        with pytest.raises(TypeError, match="must be a DataArray"):
+            da.polyfit("t", 1, error_cov=error_cov.values)
+        # Not 2-dimensional
+        with pytest.raises(ValueError, match="2-dimensional"):
+            da.polyfit("t", 1, error_cov=error_cov.expand_dims("k"))
+        # Same dimension name on both axes
+        with pytest.raises(ValueError, match="distinct dimension names"):
+            da.polyfit(
+                "t",
+                1,
+                error_cov=dup_dim_error_cov,
+            )
+        # Missing labels on one axis
+        with pytest.raises(ValueError, match="no coordinate labels"):
+            da.polyfit(
+                "t",
+                1,
+                error_cov=xr.DataArray(
+                    error_cov.values,
+                    dims=("obs_i", "obs_j"),
+                    coords={"obs_i": labels},
+                ),
+            )
+        # Duplicated labels
+        dup = np.concatenate([labels, labels])
+        with pytest.raises(ValueError, match="duplicate labels"):
+            da.polyfit(
+                "t",
+                1,
+                error_cov=xr.DataArray(
+                    np.eye(12),
+                    dims=("obs_i", "obs_j"),
+                    coords={"obs_i": dup, "obs_j": dup},
+                ),
+            )
+        # Labels not matching the fit coordinate
+        with pytest.raises(ValueError, match="do not match"):
+            da.polyfit("t", 1, error_cov=error_cov.assign_coords(obs_j=labels + 1))
+        # Complex values
+        with pytest.raises(TypeError, match="real-valued"):
+            da.polyfit("t", 1, error_cov=error_cov.astype(complex))
+        # NaN values
+        with pytest.raises(ValueError, match="NaN or infinite"):
+            da.polyfit("t", 1, error_cov=error_cov.where(error_cov.obs_i != 0))
+        # Not symmetric
+        asym = error_cov.values.copy()
+        asym[0, 1] += 1.0
+        with pytest.raises(ValueError, match="symmetric"):
+            da.polyfit(
+                "t",
+                1,
+                error_cov=xr.DataArray(
+                    asym, dims=("obs_i", "obs_j"), coords=error_cov.coords
+                ),
+            )
+        # Not positive definite
+        with pytest.raises(ValueError, match="positive definite"):
+            da.polyfit("t", 1, error_cov=error_cov * -1)
+
+    def test_polyfit_gls_error_names_variable(self, monkeypatch) -> None:
+        labels = np.arange(6, dtype=float)
+        error_cov = self._gls_error_cov(labels)
+        ds = xr.Dataset({"myvar": ("t", labels)}, coords={"t": labels})
+
+        def fail(*args, **kwargs):
+            raise np.linalg.LinAlgError("mock failure")
+
+        monkeypatch.setattr("xarray.computation.fit.gls_least_squares", fail)
+        with pytest.raises(np.linalg.LinAlgError, match="'myvar'"):
+            ds.polyfit("t", 1, error_cov=error_cov)
+    @staticmethod
     def _test_data_var_interior(
         original_data_var, padded_data_var, padded_dim_name, expected_pad_values
     ):

@@ -257,6 +257,28 @@ def _nanpolyfit_1d(arr, x, rcond=None):
     return out
 
 
+def _gls_lstsq(lhs, rhs, cov, rcond=None):
+    # Generalized least squares with observation error covariance ``cov``,
+    # solved as ordinary least squares on the system whitened with the
+    # Cholesky factor of ``cov``.
+    chol = np.linalg.cholesky(cov)
+    lhs_w = np.linalg.solve(chol, lhs)
+    rhs_w = np.linalg.solve(chol, rhs)
+    return np.linalg.lstsq(lhs_w, rhs_w, rcond=rcond)
+
+
+def _nanglspolyfit_1d(arr, x, cov, rcond=None):
+    out = np.full((x.shape[1] + 1,), np.nan)
+    mask = np.isnan(arr)
+    if not np.all(mask):
+        x_sub = x[~mask, :]
+        cov_sub = cov[~mask][:, ~mask]
+        out[:-1], resid, rank, _ = _gls_lstsq(x_sub, arr[~mask], cov_sub, rcond=rcond)
+        out[-1] = resid[0] if resid.size > 0 else np.nan
+        warn_on_deficient_rank(rank, x.shape[1])
+    return out
+
+
 def warn_on_deficient_rank(rank, order):
     if rank != order:
         warnings.warn("Polyfit may be poorly conditioned", RankWarning, stacklevel=2)
@@ -292,6 +314,52 @@ def least_squares(lhs, rhs, rcond=None, skipna=False):
             residuals = residuals.reshape(residuals.shape[0])
     else:
         coeffs, residuals, rank, _ = np.linalg.lstsq(lhs, rhs, rcond=rcond)
+        if residuals.size == 0:
+            residuals = coeffs[0] * np.nan
+        warn_on_deficient_rank(rank, lhs.shape[1])
+
+    if out_shape is not None:
+        coeffs = coeffs.reshape(-1, *out_shape[1:])
+        residuals = residuals.reshape(*out_shape[1:])
+    return coeffs, residuals
+
+
+def gls_least_squares(lhs, rhs, cov, rcond=None, skipna=False):
+    """Return the coefficients and residuals of a generalized least-squares fit.
+
+    ``lhs`` is the design matrix and ``cov`` the (square, positive definite)
+    observation error covariance matrix of the samples along axis 0 of ``rhs``.
+    The residuals are the whitened (Mahalanobis) sums of squares.
+    """
+    if rhs.ndim > 2:
+        out_shape = rhs.shape
+        rhs = rhs.reshape(rhs.shape[0], -1)
+    else:
+        out_shape = None
+
+    if skipna:
+        added_dim = rhs.ndim == 1
+        if added_dim:
+            rhs = rhs.reshape(rhs.shape[0], 1)
+        nan_cols = np.any(np.isnan(rhs), axis=0)
+        out = np.empty((lhs.shape[1] + 1, rhs.shape[1]))
+        if np.any(nan_cols):
+            out[:, nan_cols] = np.apply_along_axis(
+                _nanglspolyfit_1d, 0, rhs[:, nan_cols], lhs, cov, rcond=rcond
+            )
+        if np.any(~nan_cols):
+            out[:-1, ~nan_cols], resids, rank, _ = _gls_lstsq(
+                lhs, rhs[:, ~nan_cols], cov, rcond=rcond
+            )
+            out[-1, ~nan_cols] = resids if resids.size > 0 else np.nan
+            warn_on_deficient_rank(rank, lhs.shape[1])
+        coeffs = out[:-1, :]
+        residuals = out[-1, :]
+        if added_dim:
+            coeffs = coeffs.reshape(coeffs.shape[0])
+            residuals = residuals.reshape(residuals.shape[0])
+    else:
+        coeffs, residuals, rank, _ = _gls_lstsq(lhs, rhs, cov, rcond=rcond)
         if residuals.size == 0:
             residuals = coeffs[0] * np.nan
         warn_on_deficient_rank(rank, lhs.shape[1])

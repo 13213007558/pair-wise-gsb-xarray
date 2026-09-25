@@ -86,6 +86,75 @@ def least_squares(lhs, rhs, rcond=None, skipna=False):
     return coeffs, residuals
 
 
+def gls_least_squares(lhs, rhs, cov, rcond=None, skipna=False):
+    """Generalized least squares with observation error covariance ``cov``.
+
+    Mirrors :func:`xarray.core.nputils.gls_least_squares` for chunked arrays.
+    The covariance matrix is an in-memory numpy array; only the observations
+    in ``rhs`` stay lazy.
+    """
+    da = get_chunked_array_type(rhs).array_api
+
+    # The trick here is that the core dimension is axis 0.
+    # All other dimensions need to be reshaped down to one axis for `lstsq`
+    # (which only accepts 2D input)
+    # and this needs to be undone after running `lstsq`
+    # The order of values in the reshaped axes is irrelevant.
+    # There are big gains to be had by simply reshaping the blocks on a blockwise
+    # basis, and then undoing that transform.
+    # We use a specific `reshape_blockwise` method in dask for this optimization
+    if rhs.ndim > 2:
+        out_shape = rhs.shape
+        reshape_chunks = rhs.chunks
+        rhs = reshape_blockwise(rhs, (rhs.shape[0], math.prod(rhs.shape[1:])))
+    else:
+        out_shape = None
+
+    if skipna:
+        lhs_da = da.from_array(lhs, chunks=(rhs.chunks[0], lhs.shape[1]))
+        added_dim = rhs.ndim == 1
+        if added_dim:
+            rhs = rhs.reshape(rhs.shape[0], 1)
+        results = da.apply_along_axis(
+            nputils._nanglspolyfit_1d,
+            0,
+            rhs,
+            lhs_da,
+            cov=cov,
+            dtype=float,
+            shape=(lhs.shape[1] + 1,),
+            rcond=rcond,
+        )
+        coeffs = results[:-1, ...]
+        residuals = results[-1, ...]
+        if added_dim:
+            coeffs = coeffs.reshape(coeffs.shape[0])
+            residuals = residuals.reshape(residuals.shape[0])
+    else:
+        # Whiten the system with the inverse Cholesky factor of the covariance
+        # and solve the ordinary least-squares problem, without ever realizing
+        # the observations while building the graph.
+        chol = np.linalg.cholesky(cov)
+        lhs_w = np.linalg.solve(chol, lhs)
+        lhs_da = da.from_array(lhs_w, chunks=(rhs.chunks[0], lhs.shape[1]))
+        rhs_w = np.linalg.inv(chol) @ rhs
+        # Residuals here are (1, 1) but should be (K,) as rhs is (N, K)
+        # See issue dask/dask#6516
+        coeffs, residuals, _, _ = da.linalg.lstsq(lhs_da, rhs_w)
+
+    if out_shape is not None:
+        coeffs = reshape_blockwise(
+            coeffs,
+            shape=(coeffs.shape[0], *out_shape[1:]),
+            chunks=((coeffs.shape[0],), *reshape_chunks[1:]),
+        )
+        residuals = reshape_blockwise(
+            residuals, shape=out_shape[1:], chunks=reshape_chunks[1:]
+        )
+
+    return coeffs, residuals
+
+
 def _fill_with_last_one(a, b):
     import numpy as np
 

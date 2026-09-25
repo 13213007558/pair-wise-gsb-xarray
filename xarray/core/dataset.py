@@ -9077,6 +9077,7 @@ class Dataset(
         w: Hashable | Any = None,
         full: bool = False,
         cov: bool | Literal["unscaled"] = False,
+        error_cov: DataArray | None = None,
     ) -> Self:
         """
         Least squares polynomial fit.
@@ -9105,6 +9106,21 @@ class Dataset(
         cov : bool or "unscaled", default: False
             Whether to return to the covariance matrix in addition to the coefficients.
             The matrix is not scaled if `cov='unscaled'`.
+        error_cov : DataArray, optional
+            Observation error covariance matrix used to perform a generalized
+            least squares (GLS) fit, for observations whose errors are
+            correlated between neighboring samples. Must be a real, symmetric,
+            positive definite 2-dimensional DataArray whose two dimensions are
+            both labeled with the same coordinate values as ``dim`` (in any
+            order; the matrix is aligned automatically). Cannot be combined
+            with ``w``, which only expresses independent per-sample weights.
+            When invalid values are skipped (``skipna=True``), the matching
+            rows and columns of the covariance matrix are dropped separately
+            for each variable. Combine with ``cov=True`` to scale the
+            coefficient covariance by the residual variance estimate
+            (appropriate when ``error_cov`` only determines the errors up to a
+            common scale factor), or with ``cov='unscaled'`` when ``error_cov``
+            is the known absolute covariance of the observations.
 
         Returns
         -------
@@ -9116,6 +9132,8 @@ class Dataset(
             [var]_polyfit_residuals
                 The residuals of the least-square computation for each variable (only included if `full=True`)
                 When the matrix rank is deficient, np.nan is returned.
+                With ``error_cov``, these are the whitened (Mahalanobis) sums
+                of squares of the residuals.
             [dim]_matrix_rank
                 The effective rank of the scaled Vandermonde coefficient matrix (only included if `full=True`)
                 The rank is computed ignoring the NaN values that might be skipped.
@@ -9138,7 +9156,7 @@ class Dataset(
         """
         from xarray.computation.fit import polyfit as polyfit_impl
 
-        return polyfit_impl(self, dim, deg, skipna, rcond, w, full, cov)
+        return polyfit_impl(self, dim, deg, skipna, rcond, w, full, cov, error_cov)
 
     def pad(
         self,

@@ -13,6 +13,14 @@ v2026.07.1 (unreleased)
 
 New Features
 ~~~~~~~~~~~~
+- :py:meth:`Dataset.polyfit` and :py:meth:`DataArray.polyfit` now accept an
+  ``error_cov`` argument: a labeled observation error covariance matrix used
+  to perform a generalized least squares (GLS) polynomial fit for
+  observations with correlated errors. Both observation axes are aligned
+  with the fit coordinate by label, rows and columns of the covariance are
+  dropped together with missing samples, and the coefficient covariance is
+  available via the existing ``cov`` option.
+
 - Added `PyArrowCapsule interface <https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html#arrow-pycapsule-interface>`_
   to :py:class:`DataArray` (``__arrow_c_schema__`` and ``__arrow_c_stream__``), enabling near zero-copy
   export to pyarrow, polars or duckdb.

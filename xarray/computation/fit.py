@@ -24,7 +24,11 @@ except ImportError:
 from xarray.computation.apply_ufunc import apply_ufunc
 from xarray.computation.computation import _ensure_numeric, where
 from xarray.core.dataarray import DataArray
-from xarray.core.duck_array_ops import is_duck_dask_array, least_squares
+from xarray.core.duck_array_ops import (
+    gls_least_squares,
+    is_duck_dask_array,
+    least_squares,
+)
 from xarray.core.types import Dims, ErrorOptions
 from xarray.core.variable import Variable
 from xarray.structure.alignment import broadcast
@@ -98,6 +102,88 @@ def _initialize_curvefit_params(params, p0, bounds, func_args):
     return param_defaults, bounds_defaults
 
 
+def _validate_error_covariance(
+    error_cov: DataArray, dim: Hashable, coord: DataArray
+) -> np.ndarray:
+    """Validate the observation error covariance matrix and align it with the
+    fit coordinate.
+
+    Returns the covariance as a float64 numpy array whose rows and columns
+    follow the order of ``coord``.
+    """
+    if not isinstance(error_cov, DataArray):
+        raise TypeError(
+            "`error_cov` must be a DataArray so that both observation axes "
+            "carry coordinate labels."
+        )
+    if error_cov.ndim != 2:
+        raise ValueError(
+            f"`error_cov` must be 2-dimensional, got {error_cov.ndim} dimensions."
+        )
+    row_dim, col_dim = error_cov.dims
+    if row_dim == col_dim:
+        raise ValueError(
+            "`error_cov` must have two distinct dimension names, got "
+            f"{row_dim!r} twice."
+        )
+
+    fit_labels = np.asarray(coord.values)
+    if np.unique(fit_labels).size != fit_labels.size:
+        raise ValueError(
+            f"Cannot align `error_cov` with {dim!r}: the fit coordinate contains "
+            "duplicate labels."
+        )
+
+    aligned = error_cov
+    for axis_dim in (row_dim, col_dim):
+        if axis_dim not in error_cov.coords:
+            raise ValueError(
+                f"`error_cov` dimension {axis_dim!r} has no coordinate labels; "
+                "both observation axes must be labeled like the fit coordinate "
+                f"{dim!r}."
+            )
+        axis_coord = error_cov.coords[axis_dim]
+        if axis_coord.dims != (axis_dim,):
+            raise ValueError(
+                f"The labels of `error_cov` dimension {axis_dim!r} must form a "
+                "1-dimensional coordinate along that dimension."
+            )
+        axis_labels = np.asarray(axis_coord.values)
+        if np.unique(axis_labels).size != axis_labels.size:
+            raise ValueError(
+                f"`error_cov` coordinate {axis_dim!r} contains duplicate labels."
+            )
+        if axis_labels.size != fit_labels.size or not np.isin(
+            axis_labels, fit_labels
+        ).all():
+            raise ValueError(
+                f"The labels of `error_cov` dimension {axis_dim!r} do not match "
+                f"the labels of the fit coordinate {dim!r}."
+            )
+        aligned = aligned.sel({axis_dim: fit_labels})
+
+    if np.iscomplexobj(aligned.data):
+        raise TypeError(
+            "`error_cov` must be real-valued; complex covariance matrices are "
+            "not supported yet."
+        )
+    try:
+        cov_matrix = np.asarray(aligned.data, dtype=np.float64)
+    except (TypeError, ValueError) as err:
+        raise TypeError(
+            f"`error_cov` must contain real numbers, got dtype {aligned.dtype}."
+        ) from err
+    if not np.all(np.isfinite(cov_matrix)):
+        raise ValueError("`error_cov` must not contain NaN or infinite values.")
+    if not np.allclose(cov_matrix, cov_matrix.T):
+        raise ValueError("`error_cov` must be symmetric.")
+    try:
+        np.linalg.cholesky(cov_matrix)
+    except np.linalg.LinAlgError as err:
+        raise ValueError("`error_cov` must be positive definite.") from err
+    return cov_matrix
+
+
 def polyfit(
     obj,
     dim: Hashable,
@@ -107,6 +193,7 @@ def polyfit(
     w: Hashable | Any = None,
     full: bool = False,
     cov: bool | Literal["unscaled"] = False,
+    error_cov: DataArray | None = None,
 ):
     """
     Least squares polynomial fit.
@@ -137,6 +224,21 @@ def polyfit(
     cov : bool or "unscaled", default: False
         Whether to return to the covariance matrix in addition to the coefficients.
         The matrix is not scaled if `cov='unscaled'`.
+    error_cov : DataArray, optional
+        Observation error covariance matrix used to perform a generalized
+        least squares (GLS) fit, for observations whose errors are correlated
+        between neighboring samples. Must be a real, symmetric, positive
+        definite 2-dimensional DataArray whose two dimensions are both labeled
+        with the same coordinate values as ``dim`` (in any order; the matrix is
+        aligned automatically). Cannot be combined with ``w``, which only
+        expresses independent per-sample weights. When invalid values are
+        skipped (``skipna=True``), the matching rows and columns of the
+        covariance matrix are dropped separately for each variable.
+        Combine with ``cov=True`` to scale the coefficient covariance by the
+        residual variance estimate (appropriate when ``error_cov`` only
+        determines the errors up to a common scale factor), or with
+        ``cov='unscaled'`` when ``error_cov`` is the known absolute covariance
+        of the observations.
 
     Returns
     -------
@@ -148,6 +250,8 @@ def polyfit(
         [var]_polyfit_residuals
             The residuals of the least-square computation for each variable (only included if `full=True`)
             When the matrix rank is deficient, np.nan is returned.
+            With ``error_cov``, these are the whitened (Mahalanobis) sums of
+            squares of the residuals.
         [dim]_matrix_rank
             The effective rank of the scaled Vandermonde coefficient matrix (only included if `full=True`)
             The rank is computed ignoring the NaN values that might be skipped.
@@ -181,6 +285,13 @@ def polyfit(
     if rcond is None:
         rcond = x.shape[0] * np.finfo(x.dtype).eps
 
+    if w is not None and error_cov is not None:
+        raise ValueError(
+            "`w` and `error_cov` cannot be used together: `w` expresses "
+            "independent per-sample weights while `error_cov` describes "
+            "correlated observation errors through a full covariance matrix."
+        )
+
     # Weights:
     if w is not None:
         if isinstance(w, Hashable):
@@ -192,9 +303,20 @@ def polyfit(
             raise TypeError(f"Expected w and {dim} to have the same length")
         lhs *= w[:, np.newaxis]
 
+    gls_cov = None
+    lhs_unwhitened = None
+    if error_cov is not None:
+        gls_cov = _validate_error_covariance(error_cov, dim, obj.coords[dim])
+        # Generalized least squares with covariance S is ordinary least
+        # squares on the system whitened with the Cholesky factor of S.
+        lhs_unwhitened = lhs
+        lhs = np.linalg.solve(np.linalg.cholesky(gls_cov), lhs)
+
     # Scaling
     scale = np.sqrt((lhs * lhs).sum(axis=0))
     lhs /= scale
+    if lhs_unwhitened is not None:
+        lhs_unwhitened = lhs_unwhitened / scale
 
     from xarray.core import utils
 
@@ -252,9 +374,19 @@ def polyfit(
             else:  # Raise only once per variable
                 warnings.simplefilter("once", RankWarning)
 
-            coeffs, residuals = least_squares(
-                lhs, rhs.data, rcond=rcond, skipna=skipna_da
-            )
+            if gls_cov is not None:
+                try:
+                    coeffs, residuals = gls_least_squares(
+                        lhs_unwhitened, rhs.data, gls_cov, rcond=rcond, skipna=skipna_da
+                    )
+                except np.linalg.LinAlgError as err:
+                    raise np.linalg.LinAlgError(
+                        f"Generalized least squares failed for variable {name!r}: {err}"
+                    ) from err
+            else:
+                coeffs, residuals = least_squares(
+                    lhs, rhs.data, rcond=rcond, skipna=skipna_da
+                )
 
         from xarray.core.dataarray import _THIS_ARRAY
 
