@@ -13,6 +13,14 @@ v2026.07.1 (unreleased)
 
 New Features
 ~~~~~~~~~~~~
+- Added a generalized least squares mode to :py:meth:`Dataset.polyfit` and
+  :py:meth:`DataArray.polyfit` via the new ``error_cov`` parameter, which accepts
+  the observation error covariance matrix as a labeled 2-dimensional
+  :py:class:`DataArray` aligned with the fit coordinate. The fit returns the
+  coefficients, the whitened residual sum of squares and the covariance of the
+  coefficients, dropping missing samples of each variable from the covariance
+  in sync.
+
 - Added `PyArrowCapsule interface <https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html#arrow-pycapsule-interface>`_
   to :py:class:`DataArray` (``__arrow_c_schema__`` and ``__arrow_c_stream__``), enabling near zero-copy
   export to pyarrow, polars or duckdb.

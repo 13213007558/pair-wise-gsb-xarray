@@ -5891,6 +5891,7 @@ class DataArray(
         w: Hashable | Any | None = None,
         full: bool = False,
         cov: bool | Literal["unscaled"] = False,
+        error_cov: DataArray | None = None,
     ) -> Dataset:
         """
         Least squares polynomial fit.
@@ -5919,6 +5920,23 @@ class DataArray(
         cov : bool or "unscaled", default: False
             Whether to return to the covariance matrix in addition to the coefficients.
             The matrix is not scaled if `cov='unscaled'`.
+        error_cov : DataArray, optional
+            Covariance matrix of the observation errors, used to perform a
+            generalized least squares (GLS) fit instead of an ordinary least
+            squares fit. Must be a 2-dimensional DataArray where both
+            dimensions carry coordinates whose labels align with the fit
+            coordinate ``dim``; the matrix is reordered to match the fit
+            coordinate, and rows and columns corresponding to missing samples
+            are dropped in sync. Only real symmetric positive definite
+            matrices are accepted, and the matrix must be backed by an
+            in-memory array. Cannot be combined with ``w`` or ``full=True``.
+            When given, the coefficients, the residual sum of squares
+            (whitened by the covariance, i.e. ``r^T C^-1 r``) and the
+            covariance of the coefficients are always returned. By default
+            the coefficient covariance is scaled by the residual variance,
+            treating ``error_cov`` as relative weights only; pass
+            ``cov="unscaled"`` if ``error_cov`` is the known absolute
+            covariance of the observations.
 
         Returns
         -------
@@ -5936,6 +5954,7 @@ class DataArray(
                 The singular values of the scaled Vandermonde coefficient matrix (only included if `full=True`)
             polyfit_covariance
                 The covariance matrix of the polynomial coefficient estimates (only included if `full=False` and `cov=True`)
+                Always included when ``error_cov`` is given.
 
         See Also
         --------
@@ -5946,7 +5965,8 @@ class DataArray(
         """
         # For DataArray, use the original implementation by converting to a dataset
         return self._to_temp_dataset().polyfit(
-            dim, deg, skipna=skipna, rcond=rcond, w=w, full=full, cov=cov
+            dim, deg, skipna=skipna, rcond=rcond, w=w, full=full, cov=cov,
+            error_cov=error_cov,
         )
 
     def pad(

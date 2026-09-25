@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from functools import partial
 
 import numpy as np
 
@@ -84,6 +85,64 @@ def least_squares(lhs, rhs, rcond=None, skipna=False):
         )
 
     return coeffs, residuals
+
+
+def gls_least_squares(
+    x, cov, chol, rhs, order, rcond=None, skipna=False, scaled=True, name=None
+):
+    da = get_chunked_array_type(rhs).array_api
+
+    # Same reshaping trick as least_squares above: fold all non-core
+    # dimensions into a single axis and undo the transform afterwards.
+    added_dim = rhs.ndim == 1
+    if added_dim:
+        rhs = rhs.reshape(rhs.shape[0], 1)
+    if rhs.ndim > 2:
+        out_shape = rhs.shape
+        reshape_chunks = rhs.chunks
+        rhs = reshape_blockwise(rhs, (rhs.shape[0], math.prod(rhs.shape[1:])))
+    else:
+        out_shape = None
+
+    func = partial(
+        nputils._gls_polyfit_1d,
+        x=x,
+        cov=cov,
+        chol=chol,
+        order=order,
+        rcond=rcond,
+        skipna=skipna,
+        scaled=scaled,
+        name=name,
+    )
+    width = order + 1 + order * order
+    results = da.apply_along_axis(func, 0, rhs, dtype=float, shape=(width,))
+    coeffs = results[:order]
+    residuals = results[order]
+    covariance = results[order + 1 :]
+
+    trailing = out_shape[1:] if out_shape is not None else rhs.shape[1:]
+    trailing_chunks = reshape_chunks[1:] if out_shape is not None else rhs.chunks[1:]
+    covariance = reshape_blockwise(
+        covariance,
+        shape=(order, order, *trailing),
+        chunks=((order,), (order,), *trailing_chunks),
+    )
+    if out_shape is not None:
+        coeffs = reshape_blockwise(
+            coeffs,
+            shape=(order, *out_shape[1:]),
+            chunks=((order,), *reshape_chunks[1:]),
+        )
+        residuals = reshape_blockwise(
+            residuals, shape=out_shape[1:], chunks=reshape_chunks[1:]
+        )
+    if added_dim:
+        coeffs = coeffs.reshape(coeffs.shape[0])
+        residuals = residuals.reshape(())
+        covariance = covariance.reshape(order, order)
+
+    return coeffs, residuals, covariance
 
 
 def _fill_with_last_one(a, b):

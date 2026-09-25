@@ -262,6 +262,110 @@ def warn_on_deficient_rank(rank, order):
         warnings.warn("Polyfit may be poorly conditioned", RankWarning, stacklevel=2)
 
 
+def _gls_polyfit_1d(
+    arr, x, cov, chol, order, rcond=None, skipna=False, scaled=True, name=None
+):
+    """Generalized least squares polynomial fit of a single 1D slice.
+
+    Returns a flat vector with the coefficients, the (whitened) residual
+    sum of squares and the entries of the coefficient covariance matrix.
+    "cov" is the observation error covariance and "chol" its lower
+    Cholesky factor; rows/columns of "cov" corresponding to missing
+    samples are dropped in sync with "x" and "arr".
+    """
+    out = np.full((order + 1 + order * order,), np.nan)
+    mask = np.isnan(arr)
+    if mask.any():
+        if not skipna:
+            return out
+        keep = ~mask
+        n_valid = int(keep.sum())
+        if n_valid == 0:
+            return out
+        xs = x[keep]
+        ys = arr[keep]
+        cov_sub = cov[np.ix_(keep, keep)]
+        try:
+            factor = np.linalg.cholesky(cov_sub)
+        except np.linalg.LinAlgError as err:
+            raise ValueError(
+                f"error_cov is not positive definite for variable {name!r} "
+                "after dropping its missing samples"
+            ) from err
+    else:
+        xs = x
+        ys = arr
+        n_valid = arr.size
+        factor = chol
+
+    lhs = np.vander(xs, order)
+    # Whiten the problem: solve L B = X and L g = y with cov = L L^T, then
+    # the GLS solution is the OLS solution of the whitened system.
+    white_lhs = np.linalg.solve(factor, lhs)
+    white_rhs = np.linalg.solve(factor, ys)
+    scale = np.sqrt((white_lhs * white_lhs).sum(axis=0))
+    with np.errstate(invalid="ignore"):
+        scaled_lhs = white_lhs / scale
+    coeffs_scaled, resids, rank, _ = np.linalg.lstsq(scaled_lhs, white_rhs, rcond=rcond)
+    with np.errstate(invalid="ignore"):
+        coeffs = coeffs_scaled / scale
+    if resids.size > 0:
+        residual = resids[0]
+    else:
+        residual = np.sum((white_rhs - scaled_lhs @ coeffs_scaled) ** 2)
+    warn_on_deficient_rank(rank, order)
+    try:
+        vbase = np.linalg.inv(np.dot(scaled_lhs.T, scaled_lhs))
+        vbase /= np.outer(scale, scale)
+    except np.linalg.LinAlgError:
+        vbase = np.full((order, order), np.nan)
+    if scaled:
+        # error_cov only known up to a common factor: estimate it from the
+        # residuals, like the scaled covariance of numpy.polyfit.
+        fac = residual / (n_valid - order) if n_valid > order else np.nan
+    else:
+        # error_cov is the known absolute covariance of the observations.
+        fac = 1.0
+    out[:order] = coeffs
+    out[order] = residual
+    out[order + 1 :] = (vbase * fac).ravel()
+    return out
+
+
+def gls_least_squares(
+    x, cov, chol, rhs, order, rcond=None, skipna=False, scaled=True, name=None
+):
+    """Generalized least squares fit returning coefficients, the residual
+    sum of squares and the coefficient covariance for each slice of "rhs"
+    along axis 0.
+    """
+    added_dim = rhs.ndim == 1
+    if added_dim:
+        rhs = rhs.reshape(rhs.shape[0], 1)
+    if rhs.ndim > 2:
+        out_shape = rhs.shape
+        rhs = rhs.reshape(rhs.shape[0], -1)
+    else:
+        out_shape = None
+
+    width = order + 1 + order * order
+    out = np.empty((width, rhs.shape[1]))
+    for j in range(rhs.shape[1]):
+        out[:, j] = _gls_polyfit_1d(
+            rhs[:, j], x, cov, chol, order, rcond, skipna, scaled, name
+        )
+
+    trailing = out_shape[1:] if out_shape is not None else rhs.shape[1:]
+    coeffs = out[:order].reshape(order, *trailing)
+    residuals = out[order].reshape(*trailing)
+    covariance = out[order + 1 :].reshape(order, order, *trailing)
+    if added_dim:
+        coeffs = coeffs.reshape(coeffs.shape[0])
+        residuals = residuals.reshape(())
+        covariance = covariance.reshape(order, order)
+    return coeffs, residuals, covariance
+
+
 def least_squares(lhs, rhs, rcond=None, skipna=False):
     if rhs.ndim > 2:
         out_shape = rhs.shape

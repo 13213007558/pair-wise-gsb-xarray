@@ -24,7 +24,11 @@ except ImportError:
 from xarray.computation.apply_ufunc import apply_ufunc
 from xarray.computation.computation import _ensure_numeric, where
 from xarray.core.dataarray import DataArray
-from xarray.core.duck_array_ops import is_duck_dask_array, least_squares
+from xarray.core.duck_array_ops import (
+    gls_least_squares,
+    is_duck_dask_array,
+    least_squares,
+)
 from xarray.core.types import Dims, ErrorOptions
 from xarray.core.variable import Variable
 from xarray.structure.alignment import broadcast
@@ -107,6 +111,7 @@ def polyfit(
     w: Hashable | Any = None,
     full: bool = False,
     cov: bool | Literal["unscaled"] = False,
+    error_cov: DataArray | None = None,
 ):
     """
     Least squares polynomial fit.
@@ -137,6 +142,22 @@ def polyfit(
     cov : bool or "unscaled", default: False
         Whether to return to the covariance matrix in addition to the coefficients.
         The matrix is not scaled if `cov='unscaled'`.
+    error_cov : DataArray, optional
+        Covariance matrix of the observation errors, used to perform a
+        generalized least squares (GLS) fit instead of an ordinary least
+        squares fit. Must be a 2-dimensional DataArray where both dimensions
+        carry coordinates whose labels align with the fit coordinate ``dim``;
+        the matrix is reordered to match the fit coordinate, and for each
+        variable the rows and columns corresponding to missing samples are
+        dropped in sync with that variable. Only real symmetric positive
+        definite matrices are accepted, and the matrix must be backed by an
+        in-memory array. Cannot be combined with ``w`` or ``full=True``.
+        When given, the coefficients, the residual sum of squares (whitened
+        by the covariance, i.e. ``r^T C^-1 r``) and the covariance of the
+        coefficients are always returned. By default the coefficient
+        covariance is scaled by the residual variance, treating ``error_cov``
+        as relative weights only; pass ``cov="unscaled"`` if ``error_cov``
+        is the known absolute covariance of the observations.
 
     Returns
     -------
@@ -148,6 +169,8 @@ def polyfit(
         [var]_polyfit_residuals
             The residuals of the least-square computation for each variable (only included if `full=True`)
             When the matrix rank is deficient, np.nan is returned.
+            Always included if ``error_cov`` is given, as the whitened residual
+            sum of squares ``r^T C^-1 r`` of the generalized least squares fit.
         [dim]_matrix_rank
             The effective rank of the scaled Vandermonde coefficient matrix (only included if `full=True`)
             The rank is computed ignoring the NaN values that might be skipped.
@@ -155,6 +178,8 @@ def polyfit(
             The singular values of the scaled Vandermonde coefficient matrix (only included if `full=True`)
         [var]_polyfit_covariance
             The covariance matrix of the polynomial coefficient estimates (only included if `full=False` and `cov=True`)
+            Always included if ``error_cov`` is given, with dimensions
+            ``("cov_i", "cov_j")`` plus any additional dimensions of the variable.
 
     Warns
     -----
@@ -176,10 +201,26 @@ def polyfit(
     xname = f"{obj[dim].name}_"
     order = int(deg) + 1
     degree_coord_values = np.arange(order)[::-1]
-    lhs = np.vander(x, order)
 
     if rcond is None:
         rcond = x.shape[0] * np.finfo(x.dtype).eps
+
+    if error_cov is not None:
+        return _polyfit_gls(
+            obj,
+            dim,
+            x,
+            order,
+            degree_coord_values,
+            error_cov,
+            skipna=skipna,
+            rcond=rcond,
+            w=w,
+            full=full,
+            cov=cov,
+        )
+
+    lhs = np.vander(x, order)
 
     # Weights:
     if w is not None:
@@ -293,6 +334,191 @@ def polyfit(
             variables[name + "polyfit_covariance"] = (
                 Variable(data=Vbase, dims=("cov_i", "cov_j")) * fac
             )
+
+    return type(obj)(
+        data_vars=variables,
+        coords={
+            degree_dim: degree_coord_values,
+            **{
+                name: coord
+                for name, coord in other_coords.items()
+                if name in present_dims
+            },
+        },
+        attrs=obj.attrs.copy(),
+    )
+
+
+def _validate_error_cov(
+    error_cov: DataArray, obj, dim: Hashable
+) -> tuple[np.ndarray, np.ndarray]:
+    """Validate the observation error covariance of a GLS polynomial fit.
+
+    Returns the covariance matrix aligned with the fit coordinate and its
+    lower Cholesky factor. Every check that does not depend on the observed
+    data is performed here, before any fit is computed.
+    """
+    if not isinstance(error_cov, DataArray):
+        raise TypeError(
+            "error_cov must be a DataArray with both dimensions labeled by "
+            f"coordinates that align with the fit coordinate {dim!r}"
+        )
+    if error_cov.ndim != 2:
+        raise ValueError(
+            "error_cov must be a 2-dimensional covariance matrix, "
+            f"got {error_cov.ndim} dimensions"
+        )
+
+    fit_labels = np.asarray(obj.coords[dim].values)
+    if np.unique(fit_labels).size != fit_labels.size:
+        raise ValueError(
+            f"cannot align error_cov with the fit coordinate {dim!r} because "
+            "it has duplicate labels"
+        )
+
+    selectors = {}
+    for d in error_cov.dims:
+        if d not in error_cov.indexes:
+            raise ValueError(
+                f"error_cov dimension {d!r} has no coordinate labels; both "
+                "dimensions must carry coordinates that align with the fit "
+                f"coordinate {dim!r}"
+            )
+        if not error_cov.indexes[d].is_unique:
+            raise ValueError(
+                f"error_cov has duplicate labels along dimension {d!r}"
+            )
+        selectors[d] = fit_labels
+    try:
+        aligned = error_cov.sel(selectors)
+    except KeyError as err:
+        raise ValueError(
+            f"error_cov labels do not cover the fit coordinate {dim!r}"
+        ) from err
+
+    if is_duck_dask_array(aligned.data):
+        raise TypeError(
+            "error_cov must be backed by an in-memory array; dask-backed "
+            "covariance matrices are not supported yet"
+        )
+    if np.iscomplexobj(aligned.data):
+        raise ValueError("error_cov must be real-valued, got complex data")
+    cov_matrix = np.asarray(aligned.data, dtype=np.float64)
+    if np.isnan(cov_matrix).any():
+        raise ValueError("error_cov must not contain NaN values")
+    if not np.allclose(cov_matrix, cov_matrix.T):
+        raise ValueError("error_cov must be symmetric")
+    try:
+        cov_chol = np.linalg.cholesky(cov_matrix)
+    except np.linalg.LinAlgError as err:
+        raise ValueError("error_cov must be positive definite") from err
+    return cov_matrix, cov_chol
+
+
+def _polyfit_gls(
+    obj,
+    dim: Hashable,
+    x: np.ndarray,
+    order: int,
+    degree_coord_values: np.ndarray,
+    error_cov: DataArray,
+    skipna: bool | None,
+    rcond: np.floating[Any] | float,
+    w: Hashable | Any,
+    full: bool,
+    cov: bool | Literal["unscaled"],
+):
+    """Generalized least squares polynomial fit, see ``polyfit``."""
+    if w is not None:
+        raise ValueError(
+            "cannot pass both w and error_cov: w expresses independent "
+            "per-point weights while error_cov describes correlated "
+            "observation errors; pass only error_cov for a generalized "
+            "least squares fit"
+        )
+    if full:
+        raise ValueError(
+            "full=True is not supported with error_cov; the generalized "
+            "least squares fit always returns residuals and the covariance "
+            "of the coefficients"
+        )
+
+    cov_matrix, cov_chol = _validate_error_cov(error_cov, obj, dim)
+    # cov="unscaled" means error_cov is the known absolute covariance of the
+    # observations; otherwise it is only known up to a common factor and the
+    # coefficient covariance is scaled by the residual variance.
+    scaled = cov != "unscaled"
+
+    from xarray.core import utils
+    from xarray.core.dataarray import _THIS_ARRAY
+
+    variables: dict[Hashable, Variable] = {}
+    degree_dim = utils.get_temp_dimname(obj.dims, "degree")
+
+    # If we have a coordinate get its underlying dimension.
+    (true_dim,) = obj.coords[dim].dims
+
+    other_coords = {
+        dim: obj._variables[dim]
+        for dim in set(obj.dims) - {true_dim}
+        if dim in obj._variables
+    }
+    present_dims: set[Hashable] = set()
+    for name, var in obj._variables.items():
+        if name in obj._coord_names or name in obj.dims:
+            continue
+        if true_dim not in var.dims:
+            continue
+
+        if skipna is None:
+            skipna_da = (
+                True if is_duck_dask_array(var._data) else bool(np.any(var.isnull()))
+            )
+        else:
+            skipna_da = skipna
+
+        if var.ndim > 1:
+            rhs = var.transpose(true_dim, ...)
+            other_dims = rhs.dims[1:]
+        else:
+            rhs = var
+            other_dims = ()
+        present_dims.update(other_dims)
+
+        display_name = "<this-array>" if name is _THIS_ARRAY else name
+        with warnings.catch_warnings():
+            warnings.simplefilter("once", RankWarning)
+            coeffs, residuals, covariance = gls_least_squares(
+                x,
+                cov_matrix,
+                cov_chol,
+                rhs.data,
+                order,
+                rcond=rcond,
+                skipna=skipna_da,
+                scaled=scaled,
+                name=display_name,
+            )
+
+        if name is _THIS_ARRAY:
+            # When polyfit is called on a DataArray, ensure the resulting
+            # dataset is backwards compatible with previous behavior
+            name = ""
+        elif isinstance(name, str):
+            name = f"{name}_"
+        else:
+            # For other non-string names
+            name = ""
+
+        variables[name + "polyfit_coefficients"] = Variable(
+            data=coeffs, dims=(degree_dim,) + other_dims
+        )
+        variables[name + "polyfit_residuals"] = Variable(
+            data=residuals, dims=other_dims
+        )
+        variables[name + "polyfit_covariance"] = Variable(
+            data=covariance, dims=("cov_i", "cov_j") + other_dims
+        )
 
     return type(obj)(
         data_vars=variables,

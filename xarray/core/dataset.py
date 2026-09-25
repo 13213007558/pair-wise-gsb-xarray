@@ -9077,6 +9077,7 @@ class Dataset(
         w: Hashable | Any = None,
         full: bool = False,
         cov: bool | Literal["unscaled"] = False,
+        error_cov: DataArray | None = None,
     ) -> Self:
         """
         Least squares polynomial fit.
@@ -9105,6 +9106,24 @@ class Dataset(
         cov : bool or "unscaled", default: False
             Whether to return to the covariance matrix in addition to the coefficients.
             The matrix is not scaled if `cov='unscaled'`.
+        error_cov : DataArray, optional
+            Covariance matrix of the observation errors, used to perform a
+            generalized least squares (GLS) fit instead of an ordinary least
+            squares fit. Must be a 2-dimensional DataArray where both
+            dimensions carry coordinates whose labels align with the fit
+            coordinate ``dim``; the matrix is reordered to match the fit
+            coordinate, and for each variable the rows and columns
+            corresponding to missing samples are dropped in sync with that
+            variable. Only real symmetric positive definite matrices are
+            accepted, and the matrix must be backed by an in-memory array.
+            Cannot be combined with ``w`` or ``full=True``. When given, the
+            coefficients, the residual sum of squares (whitened by the
+            covariance, i.e. ``r^T C^-1 r``) and the covariance of the
+            coefficients are always returned. By default the coefficient
+            covariance is scaled by the residual variance, treating
+            ``error_cov`` as relative weights only; pass ``cov="unscaled"``
+            if ``error_cov`` is the known absolute covariance of the
+            observations.
 
         Returns
         -------
@@ -9123,6 +9142,8 @@ class Dataset(
                 The singular values of the scaled Vandermonde coefficient matrix (only included if `full=True`)
             [var]_polyfit_covariance
                 The covariance matrix of the polynomial coefficient estimates (only included if `full=False` and `cov=True`)
+                Always included when ``error_cov`` is given, with dimensions
+                ``("cov_i", "cov_j")`` plus any additional dimensions of the variable.
 
         Warns
         -----
@@ -9138,7 +9159,7 @@ class Dataset(
         """
         from xarray.computation.fit import polyfit as polyfit_impl
 
-        return polyfit_impl(self, dim, deg, skipna, rcond, w, full, cov)
+        return polyfit_impl(self, dim, deg, skipna, rcond, w, full, cov, error_cov)
 
     def pad(
         self,

@@ -869,6 +869,37 @@ def least_squares(lhs, rhs, rcond=None, skipna=False):
         return nputils.least_squares(lhs, rhs, rcond=rcond, skipna=skipna)
 
 
+def gls_least_squares(
+    x, cov, chol, rhs, order, rcond=None, skipna=False, scaled=True, name=None
+):
+    """Return the coefficients, residuals and coefficient covariance of a
+    generalized least-squares polynomial fit."""
+    if is_duck_dask_array(rhs):
+        return dask_array_ops.gls_least_squares(
+            x,
+            cov,
+            chol,
+            rhs,
+            order,
+            rcond=rcond,
+            skipna=skipna,
+            scaled=scaled,
+            name=name,
+        )
+    else:
+        return nputils.gls_least_squares(
+            x,
+            cov,
+            chol,
+            rhs,
+            order,
+            rcond=rcond,
+            skipna=skipna,
+            scaled=scaled,
+            name=name,
+        )
+
+
 def _push(array, n: int | None = None, axis: int = -1):
     """
     Use either bottleneck or numbagg depending on options & what's available
