@@ -16,6 +16,7 @@ Computation
    :toctree: ../generated/
 
    apply_ufunc
+   conservative_remap
    cov
    corr
    cross

@@ -29,6 +29,7 @@ from xarray.computation.computation import (
 )
 from xarray.conventions import SerializationWarning, decode_cf
 from xarray.core.common import ALL_DIMS, full_like, ones_like, zeros_like
+from xarray.core.conservative import conservative_remap
 from xarray.core.coordinates import Coordinates, CoordinateValidationError
 from xarray.core.dataarray import DataArray
 from xarray.core.dataset import Dataset
@@ -84,6 +85,7 @@ __all__ = (  # noqa: RUF022
     "combine_by_coords",
     "combine_nested",
     "concat",
+    "conservative_remap",
     "corr",
     "cov",
     "cross",

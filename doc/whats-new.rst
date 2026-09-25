@@ -13,6 +13,16 @@ v2026.07.1 (unreleased)
 
 New Features
 ~~~~~~~~~~~~
+- Added :py:func:`conservative_remap` for conservative remapping between
+  one-dimensional non-uniform grids. It explicitly takes source and target
+  cell bounds, redistributes values by interval-overlap fraction (treating
+  data as either cell totals or per-unit-length densities via ``data_kind``),
+  handles ascending or descending bounds, partial coverage and missing
+  cells, and can return the valid coverage fraction of each target cell.
+  Unlike :py:meth:`DataArray.interp`, which expresses point-value
+  interpolation, the integral over the domain is conserved.
+  By `xarray Developers <https://github.com/pydata/xarray>`_.
+
 - Added `PyArrowCapsule interface <https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html#arrow-pycapsule-interface>`_
   to :py:class:`DataArray` (``__arrow_c_schema__`` and ``__arrow_c_stream__``), enabling near zero-copy
   export to pyarrow, polars or duckdb.
