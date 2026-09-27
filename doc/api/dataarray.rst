@@ -130,6 +130,7 @@ Computation
    DataArray.groupby
    DataArray.groupby_bins
    DataArray.rolling
+   DataArray.rolling_time
    DataArray.rolling_exp
    DataArray.cumulative
    DataArray.weighted

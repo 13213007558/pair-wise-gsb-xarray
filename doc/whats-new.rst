@@ -13,6 +13,14 @@ v2026.07.1 (unreleased)
 
 New Features
 ~~~~~~~~~~~~
+- Added :py:meth:`DataArray.rolling_time` and :py:meth:`Dataset.rolling_time`
+  for rolling windows defined by an actual time length (e.g. the past two
+  hours) along a datetime64 or cftime coordinate, with configurable endpoint
+  inclusion, equal-sample or piecewise-constant duration weighting for
+  ``mean``/``sum``, and optional maximum gap coverage and minimum
+  coverage fraction constraints. Dask arrays are supported with correct
+  results across chunk boundaries.
+
 - Added `PyArrowCapsule interface <https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html#arrow-pycapsule-interface>`_
   to :py:class:`DataArray` (``__arrow_c_schema__`` and ``__arrow_c_stream__``), enabling near zero-copy
   export to pyarrow, polars or duckdb.

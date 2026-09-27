@@ -143,6 +143,11 @@ if TYPE_CHECKING:
     from xarray.backends import AbstractDataStore, ZarrStore
     from xarray.backends.api import T_NetcdfEngine, T_NetcdfTypes
     from xarray.computation.rolling import DatasetCoarsen, DatasetRolling
+    from xarray.computation.time_rolling import (
+        ClosedOptions,
+        DatasetTimeRolling,
+        TimeWindowSpec,
+    )
     from xarray.computation.weighted import DatasetWeighted
     from xarray.core.dataarray import DataArray
     from xarray.core.groupby import DatasetGroupBy
@@ -10537,6 +10542,102 @@ class Dataset(
 
         dim = either_dict_or_kwargs(dim, window_kwargs, "rolling")
         return DatasetRolling(self, dim, min_periods=min_periods, center=center)
+
+    def rolling_time(
+        self,
+        dim: Mapping[Any, TimeWindowSpec] | None = None,
+        *,
+        closed: ClosedOptions = "right",
+        include_current: bool = True,
+        max_gap: TimeWindowSpec | None = None,
+        min_coverage: float = 0.0,
+        min_periods: int = 1,
+        **window_kwargs: TimeWindowSpec,
+    ) -> DatasetTimeRolling:
+        """
+        Rolling window object for Datasets, indexed by a time duration.
+
+        Windows are defined by actual time length along a datetime64 or
+        cftime coordinate rather than by a fixed number of samples, so
+        irregularly sampled data is handled naturally: the window for the
+        sample at time t spans [t - window, t] (endpoint inclusion is
+        controlled by closed and include_current).
+
+        Parameters
+        ----------
+        dim : dict, optional
+            Mapping from the time dimension name (e.g. "time") to the
+            window length, given as a duration string (e.g. "2h"),
+            timedelta, or number of seconds.
+        closed : {"left", "right", "both", "neither"}, default: "right"
+            Which window endpoints are included. With the default "right",
+            the window is (t - window, t].
+        include_current : bool, default: True
+            Whether the sample at exactly the current time is included when
+            closed is "right" or "both".
+        max_gap : duration, optional
+            Maximum interval over which a single sample may be extended.
+            Samples are treated as piecewise-constant over the interval
+            since the previous sample; with max_gap set, the coverage of a
+            sample is capped so that data gaps cannot extend a sample
+            indefinitely.
+        min_coverage : float between 0 and 1, default: 0.0
+            Minimum fraction of the window length that must be covered by
+            valid samples (using the piecewise-constant durations described
+            below); windows with less coverage are NA.
+        min_periods : int, default: 1
+            Minimum number of valid samples in a window required to have a
+            value (otherwise result is NA).
+        **window_kwargs : optional
+            The keyword arguments form of dim.
+
+        Returns
+        -------
+        computation.time_rolling.DatasetTimeRolling
+
+        Notes
+        -----
+        Duration weighting (weight="duration" of mean and sum) treats each
+        sample as constant over the interval since the previous sample, i.e.
+        the sample at t[i] covers (t[i-1], t[i]] intersected with the window
+        and capped at max_gap; the first sample covers back to the window
+        start. Only valid (non-NaN) samples contribute coverage.
+
+        With dask arrays, each output chunk only reads the neighbouring
+        samples that can fall into its windows, not the whole time axis.
+
+        Examples
+        --------
+        >>> time = pd.date_range("2000-01-01", periods=5, freq="h")
+        >>> ds = xr.Dataset(
+        ...     {"a": ("time", np.arange(5.0))}, coords={"time": time}
+        ... )
+        >>> ds.rolling_time(time="2h").mean()
+        <xarray.Dataset> Size: 80B
+        Dimensions:  (time: 5)
+        Coordinates:
+          * time     (time) datetime64[us] 40B 2000-01-01 ... 2000-01-01T04:00:00
+        Data variables:
+            a        (time) float64 40B 0.0 0.5 1.5 2.5 3.5
+
+        See Also
+        --------
+        Dataset.rolling
+        DataArray.rolling_time
+        computation.time_rolling.DatasetTimeRolling
+        """
+        from xarray.computation.time_rolling import DatasetTimeRolling
+
+        dim = either_dict_or_kwargs(dim, window_kwargs, "rolling_time")
+        return DatasetTimeRolling(
+            self,
+            dim,
+            closed=closed,
+            include_current=include_current,
+            max_gap=max_gap,
+            min_coverage=min_coverage,
+            min_periods=min_periods,
+        )
 
     def cumulative(
         self,

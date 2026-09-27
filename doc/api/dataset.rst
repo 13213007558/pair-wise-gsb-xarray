@@ -138,6 +138,7 @@ Computation
    Dataset.groupby
    Dataset.groupby_bins
    Dataset.rolling
+   Dataset.rolling_time
    Dataset.rolling_exp
    Dataset.cumulative
    Dataset.weighted

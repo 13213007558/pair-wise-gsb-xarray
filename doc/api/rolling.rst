@@ -47,3 +47,30 @@ DataArray
    DataArrayRolling.std
    DataArrayRolling.sum
    DataArrayRolling.var
+
+Time rolling objects
+====================
+
+.. currentmodule:: xarray.computation.time_rolling
+
+Dataset
+-------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   DatasetTimeRolling
+   DatasetTimeRolling.count
+   DatasetTimeRolling.mean
+   DatasetTimeRolling.sum
+
+DataArray
+---------
+
+.. autosummary::
+   :toctree: ../generated/
+
+   DataArrayTimeRolling
+   DataArrayTimeRolling.count
+   DataArrayTimeRolling.mean
+   DataArrayTimeRolling.sum
