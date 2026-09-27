@@ -13,6 +13,14 @@ v2026.07.1 (unreleased)
 
 New Features
 ~~~~~~~~~~~~
+- Added :py:class:`xarray.indexes.PeriodicIndex`, an index for periodic
+  (circular) coordinates such as longitude. Declaring a ``period`` and
+  ``origin`` (e.g. via ``ds.set_xindex('lon', PeriodicIndex, period=360.0)``)
+  enables label-based selection that wraps around the seam of the period --
+  e.g. ``ds.sel(lon=slice(350, 10))`` on a 0..359 longitude coordinate --
+  without rolling the dataset first.
+  By `Claude <https://github.com/anthropics>`_.
+
 - Added `PyArrowCapsule interface <https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html#arrow-pycapsule-interface>`_
   to :py:class:`DataArray` (``__arrow_c_schema__`` and ``__arrow_c_stream__``), enabling near zero-copy
   export to pyarrow, polars or duckdb.

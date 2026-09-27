@@ -11,6 +11,7 @@ from xarray.core.indexes import (
     PandasMultiIndex,
 )
 from xarray.indexes.nd_point_index import NDPointIndex, TreeAdapter
+from xarray.indexes.periodic_index import PeriodicIndex
 from xarray.indexes.range_index import RangeIndex
 
 __all__ = [
@@ -20,6 +21,7 @@ __all__ = [
     "NDPointIndex",
     "PandasIndex",
     "PandasMultiIndex",
+    "PeriodicIndex",
     "RangeIndex",
     "TreeAdapter",
 ]

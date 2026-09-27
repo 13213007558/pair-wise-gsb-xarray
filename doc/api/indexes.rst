@@ -40,6 +40,7 @@ More complex indexes built-in to Xarray:
    CFTimeIndex
    indexes.RangeIndex
    indexes.NDPointIndex
+   indexes.PeriodicIndex
    indexes.CoordinateTransformIndex
 
 
