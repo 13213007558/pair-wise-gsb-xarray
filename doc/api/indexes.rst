@@ -38,6 +38,7 @@ More complex indexes built-in to Xarray:
    :toctree: ../generated/
 
    CFTimeIndex
+   indexes.PeriodicIndex
    indexes.RangeIndex
    indexes.NDPointIndex
    indexes.CoordinateTransformIndex

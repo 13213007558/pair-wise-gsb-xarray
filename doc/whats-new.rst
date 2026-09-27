@@ -13,6 +13,9 @@ v2026.07.1 (unreleased)
 
 New Features
 ~~~~~~~~~~~~
+- Added :py:class:`~xarray.indexes.PeriodicIndex`, a pandas-backed index that
+  interprets a coordinate as periodic labels. It supports label slices that
+  cross the period boundary without first rotating a Dataset or DataArray.
 - Added `PyArrowCapsule interface <https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html#arrow-pycapsule-interface>`_
   to :py:class:`DataArray` (``__arrow_c_schema__`` and ``__arrow_c_stream__``), enabling near zero-copy
   export to pyarrow, polars or duckdb.
