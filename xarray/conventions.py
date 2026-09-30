@@ -512,6 +512,7 @@ def decode_cf(
     | CFTimedeltaCoder
     | Mapping[str, bool | CFTimedeltaCoder]
     | None = None,
+    decode_ragged: bool = True,
 ) -> Dataset:
     """Decode the given Dataset or Datastore according to CF conventions into
     a new Dataset.
@@ -563,12 +564,27 @@ def decode_cf(
         If None (default), assume the same behavior as decode_times. The
         resolution of the decoded timedeltas can be configured with the
         ``time_unit`` argument in the :py:class:`CFTimedeltaCoder` passed.
+    decode_ragged : bool, optional
+        If True (default), detect CF ragged array structures (contiguous
+        ragged layout via a count variable with a ``sample_dimension``
+        attribute, or indexed ragged layout via an index variable with an
+        ``instance_dimension`` attribute) and decode them into a uniform
+        representation: observation-level variables keep the observation
+        dimension and gain a coordinate holding the integer instance index
+        of each observation, so instances can be selected uniformly (e.g.
+        ``ds.isel(obs=ds["trajectory_index"] == i)`` or
+        ``ds.groupby("trajectory_index")``) without padding to a dense
+        matrix. Instance-level variables (including empty instances) and
+        auxiliary coordinates are preserved, and the ragged structure is
+        recorded in ``ds.encoding["ragged"]`` so that :py:func:`encode_cf`
+        can re-encode either layout.
 
     Returns
     -------
     decoded : Dataset
     """
     from xarray.backends.common import AbstractDataStore
+    from xarray.coding.ragged import decode_ragged as _decode_ragged
     from xarray.core.dataset import Dataset
 
     vars: T_Variables
@@ -602,8 +618,54 @@ def decode_cf(
     ds = ds.set_coords(coord_names.union(extra_coords).intersection(vars))
     ds.set_close(close)
     ds.encoding = encoding
+    if decode_ragged:
+        ds = _decode_ragged(ds)
 
     return ds
+
+
+def encode_cf(
+    dataset: Dataset,
+    ragged_layout: Literal["contiguous", "indexed"] | None = None,
+) -> Dataset:
+    """Encode a Dataset according to CF conventions into a new Dataset.
+
+    This is the inverse of :py:func:`decode_cf`: variables are encoded with
+    the default CF coder chain (missing values, scale/offset, datetimes,
+    character arrays, etc.) and coordinates are serialized into variable
+    and global attributes.
+
+    Parameters
+    ----------
+    dataset : Dataset
+        Object to encode.
+    ragged_layout : {"contiguous", "indexed"}, optional
+        If the dataset carries a CF ragged structure (detected from
+        ``sample_dimension``/``instance_dimension`` attributes or recorded
+        in ``dataset.encoding["ragged"]`` by :py:func:`decode_cf`), encode
+        it using this ragged layout. The structural count or index variable
+        is regenerated from the per-observation instance index, so both
+        layouts can be produced from the same decoded dataset; when
+        encoding to the contiguous layout, observations are reordered so
+        that each instance is stored contiguously, preserving the
+        observation order within each instance. If None (default), the
+        layout the dataset was decoded from is used.
+
+    Returns
+    -------
+    encoded : Dataset
+
+    See Also
+    --------
+    decode_cf
+    """
+    from xarray.coding.ragged import encode_ragged
+    from xarray.core.dataset import Dataset
+
+    dataset = encode_ragged(dataset, layout=ragged_layout)
+    variables, attributes = encode_dataset_coordinates(dataset)
+    variables, attributes = cf_encoder(variables, attributes)
+    return Dataset(variables, attrs=attributes)
 
 
 def cf_decoder(

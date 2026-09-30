@@ -7,6 +7,7 @@ Encoding/Decoding
    :toctree: ../generated/
 
    decode_cf
+   encode_cf
 
 Coder objects
 -------------

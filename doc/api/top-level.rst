@@ -57,6 +57,7 @@ Miscellaneous
    :toctree: ../generated/
 
    decode_cf
+   encode_cf
    infer_freq
    show_versions
    set_options

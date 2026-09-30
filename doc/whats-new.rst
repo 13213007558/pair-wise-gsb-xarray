@@ -13,6 +13,15 @@ v2026.07.1 (unreleased)
 
 New Features
 ~~~~~~~~~~~~
+- Added explicit support for CF ragged array layouts (contiguous ragged via a
+  count variable with a ``sample_dimension`` attribute, and indexed ragged via
+  an index variable with an ``instance_dimension`` attribute) to
+  :py:func:`decode_cf` (new ``decode_ragged`` keyword) and the new
+  :py:func:`encode_cf`. Both layouts decode to a uniform representation in
+  which observation-level variables gain an instance-index coordinate for
+  per-instance selection without padding to a dense matrix, and re-encoding
+  can produce either layout while preserving per-instance observation order.
+
 - Added `PyArrowCapsule interface <https://arrow.apache.org/docs/format/CDataInterface/PyCapsuleInterface.html#arrow-pycapsule-interface>`_
   to :py:class:`DataArray` (``__arrow_c_schema__`` and ``__arrow_c_stream__``), enabling near zero-copy
   export to pyarrow, polars or duckdb.
