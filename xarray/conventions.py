@@ -10,6 +10,7 @@ import numpy as np
 
 from xarray.coders import CFDatetimeCoder, CFTimedeltaCoder
 from xarray.coding import strings, variables
+from xarray.coding.ragged import decode_ragged_variables, encode_ragged_variables
 from xarray.coding.variables import SerializationWarning, pop_to
 from xarray.core import indexing
 from xarray.core.common import (
@@ -512,6 +513,7 @@ def decode_cf(
     | CFTimedeltaCoder
     | Mapping[str, bool | CFTimedeltaCoder]
     | None = None,
+    decode_ragged: bool = True,
 ) -> Dataset:
     """Decode the given Dataset or Datastore according to CF conventions into
     a new Dataset.
@@ -564,6 +566,16 @@ def decode_cf(
         resolution of the decoded timedeltas can be configured with the
         ``time_unit`` argument in the :py:class:`CFTimedeltaCoder` passed.
 
+    decode_ragged : bool, optional
+        Decode CF ragged array representations (contiguous ragged arrays
+        declared via a ``sample_dimension`` attribute and indexed ragged
+        arrays declared via an ``instance_dimension`` attribute) into a
+        unified in-memory representation: instance-level variables keep
+        the instance dimension, observation-level variables keep the
+        observation (sample) dimension, and an integer coordinate on the
+        observation dimension maps every observation to its instance, so
+        instances can be selected without padding to a dense matrix.
+
     Returns
     -------
     decoded : Dataset
@@ -598,6 +610,9 @@ def decode_cf(
         use_cftime=use_cftime,
         decode_timedelta=decode_timedelta,
     )
+    if decode_ragged:
+        vars, ragged_coord_names = decode_ragged_variables(vars)
+        coord_names = coord_names.union(ragged_coord_names)
     ds = Dataset(vars, attrs=attrs)
     ds = ds.set_coords(coord_names.union(extra_coords).intersection(vars))
     ds.set_close(close)
@@ -768,7 +783,11 @@ def encode_dataset_coordinates(dataset: Dataset):
     )
 
 
-def cf_encoder(variables: T_Variables, attributes: T_Attrs):
+def cf_encoder(
+    variables: T_Variables,
+    attributes: T_Attrs,
+    ragged_layout: Literal["contiguous", "indexed"] | None = None,
+):
     """
     Encode a set of CF encoded variables and attributes.
     Takes a dicts of variables and attributes and encodes them
@@ -782,6 +801,11 @@ def cf_encoder(variables: T_Variables, attributes: T_Attrs):
         A dictionary mapping from variable name to xarray.Variable
     attributes : dict
         A dictionary mapping from attribute name to value
+    ragged_layout : {"contiguous", "indexed"}, optional
+        Layout used to encode decoded ragged array structures (see the
+        ``decode_ragged`` argument of :py:func:`decode_cf`).  If None
+        (default), every ragged structure is encoded in the layout it
+        was decoded from.
 
     Returns
     -------
@@ -797,6 +821,8 @@ def cf_encoder(variables: T_Variables, attributes: T_Attrs):
 
     # add encoding for time bounds variables if present.
     _update_bounds_encoding(variables)
+
+    variables = encode_ragged_variables(variables, layout=ragged_layout)
 
     new_vars = {}
     for k, v in variables.items():
